@@ -1,6 +1,6 @@
 ---
-title: "Regis Stylist Attrition"
-author: "Carlson MSBA Team"
+title: "Hair Stylist Attrition"
+author: "Saurabh Kumar"
 date: "April 3, 2017"
 output: html_document
 ---
