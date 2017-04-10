@@ -1,0 +1,234 @@
+---
+title: "Regis Stylist Attrition"
+author: "Carlson MSBA Team"
+date: "April 3, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Installing the necessary libraries:
+
+```{r}
+suppressPackageStartupMessages({
+  library(Amelia)
+  library(caret)
+  library(dplyr)
+  library(ROCR)
+  library(pROC)
+  library(C50)
+  library(car)
+  library(mlbench)
+  library(e1071)
+  library(AUC)
+  library(ROSE)
+  library(lme4)
+  library(broom)
+  library(earth)
+  library(foreign)
+  library(ggplot2)
+})
+
+```
+
+Read in the data:
+```{r}
+data1 = read.csv('C:/Users/MEGUP1/Desktop/Data/master_data_march26.csv', header=TRUE, stringsAsFactors = FALSE)
+names(data1)[1]<-"EmployeeKey"
+```
+
+Treatment of the data
+```{r}
+# Removing null values
+data1 <- data1 %>%
+  filter(TotalWage != 'NULL', TotalHours != 'NULL', TotalSales != 'NULL',
+         TotalTip != 'NULL', WageLast6Weeks != 'NULL', Tenure_in_days >= 0)
+
+data1$Tenure_in_days[data1$Tenure_in_days==0] = 1
+data1 <- data1[!data1$Division == "Trade Secret",]
+
+# Changing data type of variables
+data1$TotalWage<-as.numeric(data1$TotalWage)
+data1$TotalHours<-as.numeric(data1$TotalHours)
+data1$TotalSales<-as.numeric(data1$TotalSales)
+data1$Tenure_in_days<-as.numeric(data1$Tenure_in_days)
+data1$Age <- as.integer(data1$Age)
+data1$Stylist_is_Active <- as.factor(data1$Stylist_is_Active)
+data1$Division <- as.factor(data1$Division)
+data1$TopStylist <- as.numeric(data1$TopStylist)
+data1$NumberOfTerminations <- as.numeric(data1$NumberOfTerminations)
+data1$TotalGap <- as.numeric(data1$TotalGap)
+data1$ReHireFlag <- as.factor(data1$ReHireFlag)
+data1$DeductionFlag <- as.factor(data1$DeductionFlag)
+data1$TotalTip <- as.numeric(as.character(data1$TotalTip))
+data1$HoursLast6Weeks <- as.numeric(data1$HoursLast6Weeks)
+data1$WageLast6Weeks <- as.numeric(data1$WageLast6Weeks)
+
+# Defining new variables for Hourly metrics
+data1$HourlyTip <- as.numeric(data1$TotalTip)/as.numeric(data1$TotalHours)
+data1$hourlywage_6weeks <- as.numeric(data1$WageLast6Weeks)/as.numeric(data1$HoursLast6Weeks)
+data1$HourlySales = as.numeric(data1$TotalSales)/as.numeric(data1$TotalHours)
+data1$HourlyWage = as.numeric(data1$TotalWage)/as.numeric(data1$TotalHours)
+data1$PctTopStylist = as.numeric(data1$TopStylist)/as.numeric(data1$Tenure_in_days)
+data1$Churn = as.factor(ifelse(data1$Stylist_is_Active == 0, 1, 0))
+data1 = na.omit(data1)
+
+# Removing outliers
+dat1 <- data1 %>%
+  filter(Age > 0, Tenure_in_days > 0, TotalHours > 1, 
+         TotalSales > 0,HourlyTip >= 0, hourlywage_6weeks >= 0) %>%
+  filter(PctTopStylist <= 1, 
+         HourlySales <= quantile(data1$HourlySales, 0.75) + 3*IQR(data1$HourlySales), 
+         HourlyWage <= quantile(data1$HourlyWage, 0.75) + 3*IQR(data1$HourlyWage),
+         hourlywage_6weeks <= quantile(data1$hourlywage_6weeks, 0.75) + 3*IQR(data1$hourlywage_6weeks))
+
+# Normalizing the variables using z-scores
+
+dat1$z_sales <- scale(dat1$HourlySales, center=TRUE)
+dat1$z_tenure <- scale(dat1$Tenure_in_days, center=TRUE)
+dat1$z_gap <- scale(dat1$TotalGap, center=TRUE)
+dat1$z_topstylist <- scale(dat1$PctTopStylist, center=TRUE)
+dat1$z_numberofterminations <- scale(dat1$NumberOfTerminations, center=TRUE)
+dat1$z_wage <- scale(dat1$HourlyWage, center=TRUE)
+dat1$z_age <- scale(dat1$Age, center=TRUE)
+dat1$z_tip <- scale(dat1$HourlyTip, center=TRUE)
+dat1$z_6weekswage <- scale(dat1$hourlywage_6weeks, center=TRUE)
+
+```
+
+Logistic Model
+```{r}
+data = subset(dat1, select=c(EmployeeKey, Division, ReHireFlag, z_tenure, z_gap, 
+                             z_topstylist,z_sales, z_wage, DeductionFlag, z_tip, z_age,
+                             z_6weekswage, z_numberofterminations, Churn))
+
+# Dividing data into training and test sets 
+Train <- createDataPartition(data$Churn, p=0.8, list=FALSE)
+train <- data[ Train, ]
+test <- data[ -Train, ]
+
+# Defining a 5-fold cross validation
+cv <- trainControl(method = "cv", number = 5)
+
+# Running logistic regression on training set
+fit <- train(Churn ~ Division + ReHireFlag + DeductionFlag + z_sales + z_tenure +
+               z_gap + z_topstylist + z_wage + z_age + z_tip + z_6weekswage,
+              data = train, method = "glm", family = binomial(logit), trControl = cv)
+
+# Predicting probability of churn for test set
+pred_prob <- predict(fit, test, type = "prob")
+pred <- predict(fit, test)
+
+# Append results to test set
+test$prob_of_churn <- pred_prob$`1`
+test$prob_of_not_churn <- pred_prob$`0`
+test$prediction <- pred
+
+# Model Evaluation
+confusionMatrix(test$prediction, test$Churn, dnn = c('Predicted', 'Actual'), positive = '1')
+
+```
+
+Reason for Churn
+```{r}
+# Save results of model in data frame
+datOut <- as.data.frame(summary(fit)$coef)
+datOut <- cbind(term = rownames(datOut), datOut)
+rownames(datOut) <- NULL
+
+# Transpose of the results of the model
+datOut <- t(datOut[, 1:ncol(datOut)])
+colnames(datOut) <- datOut[1,]
+datOut <- datOut[-1,]
+datOut <- as.data.frame(datOut)
+
+# Changing values to numeric
+for(i in c(1:ncol(datOut))){
+  datOut[,i] <- as.numeric(as.character(datOut[,i]))
+}
+
+# Removing the insignificant variables
+datOut <- datOut[,!(datOut[4,] > 0.05)]
+str(datOut)
+
+# Create dummy variables
+dummies <- dummyVars(Churn ~ ., data = data)
+dummies1 <- predict(dummies, newdata = data)
+final_dummies <- as.data.frame(dummies1)
+dummy_temp <- final_dummies
+str(final_dummies)
+
+#loop runs for about 15-20 mins for 100000 records
+for(i in 1:nrow(final_dummies))
+{
+  if("DivisionNHC" %in% colnames(datOut)){
+    final_dummies$Division_NHC[i]= datOut$DivisionNHC[1]*final_dummies$Division.NHC[i]}
+  
+  if("DivisionPromenade" %in% colnames(datOut)){
+  final_dummies$Division_Promenade[i]=datOut$DivisionPromenade[1]*final_dummies$Division.Promenade[i]}
+  
+  if("DivisionMasterCuts" %in% colnames(datOut)){
+    final_dummies$Division_MasterCuts[i]= datOut$DivisionMasterCuts[1]*final_dummies$Division.MasterCuts[i]}
+  
+  if("DivisionRegis" %in% colnames(datOut)){
+    final_dummies$Division_Regis[i]= datOut$DivisionRegis[1]*final_dummies$Division.Regis[i]}
+  
+  if("DivisionSupercuts" %in% colnames(datOut)){
+    final_dummies$Division_Supercuts[i]= datOut$DivisionSupercuts[1]*final_dummies$Division.Supercuts[i]}
+  
+  if("z_topstylist" %in% colnames(datOut)){
+  final_dummies$topstylist_proportion[i]=datOut$z_topstylist[1]*final_dummies$z_topstylist[i]}
+  
+  if("z_gap" %in% colnames(datOut)){
+  final_dummies$gap[i]=datOut$z_gap[1]*final_dummies$z_gap[i]}
+  
+  if("z_tenure" %in% colnames(datOut)){
+  final_dummies$tenure[i]=datOut$z_tenure[1]*final_dummies$z_tenure[i]}
+  
+  if("ReHireFlag1" %in% colnames(datOut)){
+  final_dummies$rehire_flag1[i]=datOut$ReHireFlag1[1]*final_dummies$ReHireFlag.1[i]}
+  
+  if("ReHireFlag0" %in% colnames(datOut)){
+  final_dummies$rehire_flag0[i]=datOut$ReHireFlag0[1]*final_dummies$ReHireFlag.0[i]}
+  
+  if("DeductionFlag1" %in% colnames(datOut)){
+  final_dummies$Deductionflag1[i]=datOut$DeductionFlag1[1]*final_dummies$DeductionFlag.1[i]}
+  
+  if("DeductionFlag0" %in% colnames(datOut)){
+  final_dummies$Deductionflag0[i]=datOut$DeductionFlag0[1]*final_dummies$DeductionFlag.0[i]}
+  
+  if("z_numberofterminations" %in% colnames(datOut)){
+  final_dummies$num_of_terminations[i]=datOut$z_numberofterminations[1]*final_dummies$z_numberofterminations[i]}
+  
+  if("z_wage" %in% colnames(datOut)){
+  final_dummies$wage[i]=datOut$z_wage[1]*final_dummies$z_wage[i]}
+  
+  if("z_6weekswage" %in% colnames(datOut)){
+  final_dummies$wage_6_weeks[i]=datOut$z_6weekswage[1]*final_dummies$z_6weekswage[i]}
+  
+  if("z_age" %in% colnames(datOut)){
+  final_dummies$age_of_stylist[i]=datOut$z_agege[1]*final_dummies$z_agege[i]}
+  
+  if("z_sales" %in% colnames(datOut)){
+  final_dummies$sales[i]=datOut$z_sales[1]*final_dummies$z_sales[i]}
+  
+  if("z_tip" %in% colnames(datOut)){
+  final_dummies$tip[i]=datOut$z_tip[1]*final_dummies$z_tip[i]}
+}
+
+final_weight=final_dummies[,(ncol(dummy_temp)+1):(ncol(final_dummies))]
+final_weight$reason1_for_churn=colnames(final_weight)[apply(final_weight,1,which.max)]
+final_weight$reason2_for_churn = colnames(final_weight)[apply(final_weight[,1:(ncol(final_weight)-1)], 1, function(x)which(x != 0 & x == sort(x, decreasing = TRUE)[2])[1])]
+final_weight$reason1_weight <- apply(final_weight[,1:(ncol(final_weight)-2)], 1, max)
+final_weight$reason2_weight <- apply(final_weight[,1:(ncol(final_weight)-3)], 1, FUN = function(x) tail(sort(x), 2)[1])
+final_weight$R1R2_relativeimpact<-ifelse(final_weight$reason2_weight==0, NA, round(final_weight$reason1_weight,2)/round(final_weight$reason2_weight,2))
+reason_Output=cbind(logistic_output,PctTopstylist=dat1$PctTopStylist,hourly_sales=dat1$HourlySales,final_weight[,(ncol(final_weight)-4):(ncol(final_weight)-3)],R1R2_relativeimpact=final_weight[,ncol(final_weight)])
+
+View(datOut)
+View(reason_Output)
+write.csv(reason_Output, file = "reason_Output.csv")
+
+```
+
